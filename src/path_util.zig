@@ -611,7 +611,13 @@ test expandUser {
     const is_win = builtin.target.os.tag == .windows;
 
     if (is_win) {
-        if (c._putenv("HOME=C:\\Users\\reginald") != 0) {
+        // const key = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, "HOME");
+        // defer testing.allocator.free(key);
+        //
+        // const value = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, "C:\\Users\\reginald");
+        // defer testing.allocator.free(value);
+
+        if (std.os.windows.kernel32.SetEnvironmentVariableW("HOME", "C:\\Users\\reginald") != 0) {
             unreachable;
         }
     } else {
