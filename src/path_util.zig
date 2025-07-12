@@ -254,10 +254,10 @@ fn setenv(allocator: Allocator, key: [:0]const u8, value: [:0]const u8) !void {
 
     if (builtin.target.os.tag == .windows) {
         const key_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, key);
-        defer allocator.free(key);
+        defer allocator.free(key_w);
 
         const value_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, value);
-        defer allocator.free(value);
+        defer allocator.free(value_w);
 
         if (std.os.windows.kernel32.SetEnvironmentVariableW(key_w, value_w) == 0) {
             unreachable;
