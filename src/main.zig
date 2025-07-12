@@ -18,8 +18,6 @@ pub fn main() !void {
 
     const allocator = arena.allocator();
 
-    std.log.info("Hello Reginald", .{});
-
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
     assert(args.len > 0);
