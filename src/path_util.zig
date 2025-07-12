@@ -13,7 +13,10 @@ const testing = std.testing;
 /// `$VARIABLE`). On other platforms, only Unix-style variables are supported.
 ///
 /// Caller owns the result and should call `free` on it.
-pub fn expandEnv(allocator: Allocator, s: []const u8, env_map: std.process.EnvMap) ![]const u8 {
+pub fn expandEnv(allocator: Allocator, s: []const u8) ![]const u8 {
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
     var out: []const u8 = s;
     var buf: [1024]u8 = undefined; // TODO: Is this enough?
 
@@ -236,187 +239,169 @@ fn isSpecialVar(c: u8) bool {
     }
 }
 
+/// Set environment variable. Only for test usage.
+fn setenv(allocator: Allocator, key: [:0]const u8, value: [:0]const u8) !void {
+    assert(builtin.is_test);
+
+    if (builtin.target.os.tag == .windows) {
+        const key_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, key);
+        defer allocator.free(key);
+
+        const value_w = try std.unicode.utf8ToUtf16LeAllocZ(allocator, value);
+        defer allocator.free(value);
+
+        if (std.os.windows.kernel32.SetEnvironmentVariableW(key_w, value_w) == 0) {
+            unreachable;
+        }
+    } else {
+        const c = @cImport({
+            @cInclude("stdlib.h");
+        });
+        if (c.setenv(key, value, 1) != 0) {
+            unreachable;
+        }
+    }
+}
+
 test expandEnv {
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("SOMETHING", "hello");
+        try setenv(testing.allocator, "SOMETHING", "hello");
 
         const path = "/tmp";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("SOMETHING", "hello");
+        try setenv(testing.allocator, "SOMETHING", "hello");
 
         const path = "/tmp/$SOMETHING";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/hello", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("SOMETHING", "hello");
+        try setenv(testing.allocator, "SOMETHING", "hello");
 
         const path = "/tmp/$SOMETHING/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/hello/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("SOMETHING", "hello");
+        try setenv(testing.allocator, "SOMETHING", "hello");
 
         const path = "/tmp/${SOMETHING}";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/hello", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("SOMETHING", "hello");
+        try setenv(testing.allocator, "SOMETHING", "hello");
 
         const path = "/tmp/${SOMETHING}/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/hello/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("SOMETHING", "hello");
+        try setenv(testing.allocator, "SOMETHING", "hello");
 
         const path = "/tmp/$SOMETHIN/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp//something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("$", "PID");
+        try setenv(testing.allocator, "$", "PID");
 
         const path = "/tmp/$$/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/PID/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("1", "ARG1");
+        try setenv(testing.allocator, "1", "ARG1");
 
         const path = "/tmp/$1/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/ARG1/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("1", "ARG1");
+        try setenv(testing.allocator, "1", "ARG1");
 
         const path = "/tmp/${1}/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/ARG1/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("*", "all args");
+        try setenv(testing.allocator, "*", "all args");
 
         const path = "/tmp/$*/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/all args/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("*", "all args");
+        try setenv(testing.allocator, "*", "all args");
 
         const path = "/tmp/${*}/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/tmp/all args/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("HOME", "/usr/reginald");
-        try env.put("H", "(here is H)");
+        try setenv(testing.allocator, "HOME", "/usr/reginald");
+        try setenv(testing.allocator, "H", "(here is H)");
 
         const path = "${HOME}/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/usr/reginald/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("HOME", "/usr/reginald");
-        try env.put("H", "(here is H)");
+        try setenv(testing.allocator, "H", "(here is H)");
+        try setenv(testing.allocator, "HOME", "/usr/reginald");
 
         const path = "${H}OME/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("(here is H)OME/something_else", actual);
     }
 
     {
-        var env = std.process.EnvMap.init(testing.allocator);
-        defer env.deinit();
-
-        try env.put("HOME", "/usr/reginald");
-        try env.put("H", "(here is H)");
+        try setenv(testing.allocator, "HOME", "/usr/reginald");
+        try setenv(testing.allocator, "H", "(here is H)");
 
         const path = "$HOME/something_else";
-        const actual = try expandEnv(testing.allocator, path, env);
+        const actual = try expandEnv(testing.allocator, path);
         defer testing.allocator.free(actual);
 
         try testing.expectEqualStrings("/usr/reginald/something_else", actual);
@@ -426,176 +411,134 @@ test expandEnv {
 test "expandEnv Windows" {
     if (builtin.target.os.tag == .windows) {
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("SOMETHING", "hello");
+            try setenv(testing.allocator, "SOMETHING", "hello");
 
             const path = "/tmp";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("SOMETHING", "hello");
+            try setenv(testing.allocator, "SOMETHING", "hello");
 
             const path = "/tmp/%SOMETHING%";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/hello", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("SOMETHING", "hello");
+            try setenv(testing.allocator, "SOMETHING", "hello");
 
             const path = "/tmp/%SOMETHING%/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/hello/something_else", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("SOMETHING", "hello");
+            try setenv(testing.allocator, "SOMETHING", "hello");
 
             const path = "/tmp/%SoMEtHInG%/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/hello/something_else", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("SOMETHING", "hello");
+            try setenv(testing.allocator, "SOMETHING", "hello");
 
             const path = "/tmp/%SOMETHIN%/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp//something_else", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
             const path = "/tmp/%%/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/%/something_else", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("$", "PID");
+            try setenv(testing.allocator, "$", "PID");
 
             const path = "/tmp/%$%/something_else";
-            const actual = expandEnv(testing.allocator, path, env);
+            const actual = expandEnv(testing.allocator, path);
             try testing.expectError(error.InvalidVar, actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("1", "ARG1");
+            try setenv(testing.allocator, "1", "ARG1");
 
             const path = "/tmp/%1%/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/ARG1/something_else", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("HOME", "/usr/reginald");
-            try env.put("H", "(here is H)");
+            try setenv(testing.allocator, "HOME", "/usr/reginald");
+            try setenv(testing.allocator, "H", "(here is H)");
 
             const path = "%HOME%/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/usr/reginald/something_else", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("HOME", "/usr/reginald");
-            try env.put("H", "(here is H)");
+            try setenv(testing.allocator, "HOME", "/usr/reginald");
+            try setenv(testing.allocator, "H", "(here is H)");
 
             const path = "%H%OME/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("(here is H)OME/something_else", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("SOMETHING", "hello");
+            try setenv(testing.allocator, "SOMETHING", "hello");
 
             const path = "/tmp/$SOMETHING/dir/%SOMETHING%";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/hello/dir/hello", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("SOMETHING", "hello");
+            try setenv(testing.allocator, "SOMETHING", "hello");
 
             const path = "/tmp/${SOMETHING}/dir/%SOMETHING%";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/hello/dir/hello", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
             const path = "/tmp/%/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/%/something_else", actual);
         }
 
         {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
             const path = "/tmp/%hello&/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
+            const actual = try expandEnv(testing.allocator, path);
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/%hello&/something_else", actual);
@@ -606,24 +549,10 @@ test "expandEnv Windows" {
 test expandUser {
     const is_win = builtin.target.os.tag == .windows;
 
-    // This is really stupid.
     if (is_win) {
-        const key = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, "USERPROFILE");
-        defer testing.allocator.free(key);
-
-        const value = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, "C:\\Users\\reginald");
-        defer testing.allocator.free(value);
-
-        if (std.os.windows.kernel32.SetEnvironmentVariableW(key, value) == 0) {
-            unreachable;
-        }
+        try setenv(testing.allocator, "USERPROFILE", "C:\\Users\\reginald");
     } else {
-        const c = @cImport({
-            @cInclude("stdlib.h");
-        });
-        if (c.setenv("HOME", "/usr/home/reginald", 1) != 0) {
-            unreachable;
-        }
+        try setenv(testing.allocator, "HOME", "/usr/home/reginald");
     }
 
     {
