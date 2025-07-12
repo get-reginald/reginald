@@ -617,7 +617,7 @@ test expandUser {
         // const value = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, "C:\\Users\\reginald");
         // defer testing.allocator.free(value);
 
-        if (std.os.windows.kernel32.SetEnvironmentVariableW("HOME", "C:\\Users\\reginald") != 0) {
+        if (std.os.windows.kernel32.SetEnvironmentVariableW("HOME", "C:\\Users\\reginald") == 0) {
             unreachable;
         }
     } else {
