@@ -8,6 +8,15 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const testing = std.testing;
 
+/// Expand environment variables and user home directory in the string in that order. Caller owns
+/// the result and should call `free` on it.
+pub fn expand(allocator: Allocator, s: []const u8) ![]const u8 {
+    const tmp = try expandEnv(allocator, s);
+    defer allocator.free(tmp);
+
+    return try expandUser(allocator, tmp);
+}
+
 /// Expand environment variables in the given string. On Windows, Windows-style environment
 /// variables are supported (`%VARIABLE%`) in addition to Unix-style variables (`${VARIABLE}` and
 /// `$VARIABLE`). On other platforms, only Unix-style variables are supported.
@@ -259,6 +268,27 @@ fn setenv(allocator: Allocator, key: [:0]const u8, value: [:0]const u8) !void {
         });
         if (c.setenv(key, value, 1) != 0) {
             unreachable;
+        }
+    }
+}
+
+test expand {
+    {
+        try setenv(testing.allocator, "SOMETHING", "hello");
+
+        if (builtin.target.os.tag == .windows) {
+            try setenv(testing.allocator, "USERPROFILE", "C:\\Users\\reginald");
+        } else {
+            try setenv(testing.allocator, "HOME", "/usr/home/reginald");
+        }
+
+        const actual = try expand(testing.allocator, "~/foo/$SOMETHING/bar");
+        defer testing.allocator.free(actual);
+
+        if (builtin.target.os.tag == .windows) {
+            try testing.expectEqualStrings("C:\\Users\\reginald/foo/hello/bar", actual);
+        } else {
+            try testing.expectEqualStrings("/usr/home/reginald/foo/hello/bar", actual);
         }
     }
 }
