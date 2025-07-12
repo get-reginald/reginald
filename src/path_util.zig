@@ -604,15 +604,11 @@ test "expandEnv Windows" {
 }
 
 test expandUser {
-    const c = @cImport({
-        @cInclude("stdlib.h");
-    });
-
     const is_win = builtin.target.os.tag == .windows;
 
     // This is really stupid.
     if (is_win) {
-        const key = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, "HOME");
+        const key = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, "USERPROFILE");
         defer testing.allocator.free(key);
 
         const value = try std.unicode.utf8ToUtf16LeAllocZ(testing.allocator, "C:\\Users\\reginald");
@@ -622,6 +618,9 @@ test expandUser {
             unreachable;
         }
     } else {
+        const c = @cImport({
+            @cInclude("stdlib.h");
+        });
         if (c.setenv("HOME", "/usr/home/reginald", 1) != 0) {
             unreachable;
         }
