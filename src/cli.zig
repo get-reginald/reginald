@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const assert = std.debug.assert;
 const testing = std.testing;
+
 const Config = @import("Config.zig");
 
 const InvalidArgs = error.InvalidArgs;
@@ -20,7 +21,7 @@ const OptionValue = union(enum) {
 /// Command-line option. Every option has a long option (e.g. `--verbose`) and optionally a short,
 /// single-letter alternative (e.g. `-v`). Short options can be combined, and values for the long
 /// options can be given in the next argument or using `=`.
-const Option = struct {
+pub const Option = struct {
     name: []const u8,
     short: ?u8 = null,
     description: []const u8,

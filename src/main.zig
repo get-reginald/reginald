@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const testing = std.testing;
+
 const cli = @import("cli.zig");
 
 pub const std_options: std.Options = .{
@@ -56,4 +57,5 @@ pub fn main() !void {
 
 test {
     testing.refAllDecls(@This());
+    _ = @import("path_util.zig");
 }
