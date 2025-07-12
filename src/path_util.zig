@@ -21,7 +21,7 @@ pub fn expandEnv(allocator: Allocator, s: []const u8, env_map: std.process.EnvMa
     var fba = std.heap.FixedBufferAllocator.init(buf[0..]);
     const buf_allocator = fba.allocator();
 
-    if (builtin.target.os.tag == .windows) {
+    if (comptime builtin.target.os.tag == .windows) {
         if (std.mem.count(u8, out, "%") >= 2) {
             const tmp = try expandWindowsEnv(buf_allocator, out, env_map);
             out = tmp;
@@ -37,6 +37,51 @@ pub fn expandEnv(allocator: Allocator, s: []const u8, env_map: std.process.EnvMa
     out = unix;
 
     return try allocator.dupe(u8, out);
+}
+
+/// Naively expand user's home directory, given as '~', in the given string. The function only
+/// expands a valid formatting of a user directory that is in the beginning of the string. If the
+/// home directory is for some other user than the current user (~other), it resolves the home
+/// directory based on the home directory of the current user. The current user's home directory is
+/// resolved from environment variables.
+///
+/// Caller owns the result and should call `free` on it.
+pub fn expandUser(allocator: Allocator, s: []const u8) ![]const u8 {
+    var buf: [1024]u8 = undefined; // TODO: Is this enough?
+
+    // The buffer goes out of scope, so no need to free the temporary allocations.
+    var fba = std.heap.FixedBufferAllocator.init(buf[0..]);
+    const buf_allocator = fba.allocator();
+
+    const home = if (comptime builtin.target.os.tag == .windows)
+        try std.process.getEnvVarOwned(buf_allocator, "USERPROFILE")
+    else
+        try std.process.getEnvVarOwned(buf_allocator, "HOME");
+
+    if (std.mem.eql(u8, s, "~")) {
+        return try allocator.dupe(u8, home);
+    }
+
+    if (std.mem.startsWith(u8, s, "~")) {
+        if (s[1] == std.fs.path.sep) {
+            return try std.fs.path.join(allocator, &[_][]const u8{ home, s[2..] });
+        } else {
+            // We naively assume that all of the user home directories follow the same pattern,
+            // which is almost always correct.
+            const i = std.mem.indexOf(u8, s, std.fs.path.sep_str);
+            const user = if (i) |j| s[1..j] else s[1..];
+            // TODO: We should really be checking this.
+            const users = std.fs.path.dirname(home).?;
+
+            if (i) |j| {
+                return try std.fs.path.join(allocator, &[_][]const u8{ users, user, s[j + 1 ..] });
+            } else {
+                return try std.fs.path.join(allocator, &[_][]const u8{ users, user });
+            }
+        }
+    }
+
+    return try allocator.dupe(u8, s);
 }
 
 fn expandEnvUnix(allocator: Allocator, s: []const u8, env_map: std.process.EnvMap) ![]const u8 {
@@ -113,7 +158,7 @@ fn expandEnvUnix(allocator: Allocator, s: []const u8, env_map: std.process.EnvMa
 }
 
 fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.EnvMap) ![]const u8 {
-    assert(builtin.target.os.tag == .windows);
+    assert(comptime builtin.target.os.tag == .windows);
 
     var buf: [512]u8 = undefined; // TODO: Is this enough?
 
@@ -554,6 +599,82 @@ test "expandEnv Windows" {
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/%hello&/something_else", actual);
+        }
+    }
+}
+
+test expandUser {
+    const c = @cImport({
+        @cInclude("stdlib.h");
+    });
+
+    const is_win = builtin.target.os.tag == .windows;
+
+    if (is_win) {
+        if (c._putenv("HOME=C:\\Users\\reginald") != 0) {
+            unreachable;
+        }
+    } else {
+        if (c.setenv("HOME", "/usr/home/reginald", 1) != 0) {
+            unreachable;
+        }
+    }
+
+    {
+        const actual = try expandUser(testing.allocator, "~");
+        defer testing.allocator.free(actual);
+
+        if (is_win) {
+            try testing.expectEqualStrings("C:\\Users\\reginald", actual);
+        } else {
+            try testing.expectEqualStrings("/usr/home/reginald", actual);
+        }
+    }
+
+    {
+        if (is_win) {
+            const actual = try expandUser(testing.allocator, "~\\foo");
+            defer testing.allocator.free(actual);
+            try testing.expectEqualStrings("C:\\Users\\reginald\\foo", actual);
+        } else {
+            const actual = try expandUser(testing.allocator, "~/foo");
+            defer testing.allocator.free(actual);
+            try testing.expectEqualStrings("/usr/home/reginald/foo", actual);
+        }
+    }
+
+    {
+        const actual = try expandUser(testing.allocator, "/foo/bar");
+        defer testing.allocator.free(actual);
+        try testing.expectEqualStrings("/foo/bar", actual);
+    }
+
+    {
+        const actual = try expandUser(testing.allocator, "/foo/~/bar");
+        defer testing.allocator.free(actual);
+        try testing.expectEqualStrings("/foo/~/bar", actual);
+    }
+
+    {
+        const actual = try expandUser(testing.allocator, "~other");
+        defer testing.allocator.free(actual);
+
+        if (is_win) {
+            try testing.expectEqualStrings("C:\\Users\\other", actual);
+        } else {
+            try testing.expectEqualStrings("/usr/home/other", actual);
+        }
+    }
+
+    {
+        if (is_win) {
+            const actual = try expandUser(testing.allocator, "~other\\foo");
+            defer testing.allocator.free(actual);
+            try testing.expectEqualStrings("C:\\Users\\other\\foo", actual);
+        } else {
+            const actual = try expandUser(testing.allocator, "~other/foo");
+            defer testing.allocator.free(actual);
+            try testing.expectEqualStrings("/usr/home/other/foo", actual);
         }
     }
 }
