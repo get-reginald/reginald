@@ -195,7 +195,7 @@ pub const ParsedArgs = struct {
     }
 
     /// Get command-line option for the given name.
-    fn option(self: *@This(), name: []const u8) ?*Option {
+    pub fn option(self: *@This(), name: []const u8) ?*Option {
         for (self.options.items) |*opt| {
             if (std.mem.eql(u8, opt.name, name)) {
                 return opt;

@@ -1,4 +1,5 @@
 const std = @import("std");
+const build_options = @import("build_options");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const testing = std.testing;
@@ -26,10 +27,32 @@ pub fn main() !void {
     var parsed_args = try cli.parseArgsAlloc(allocator, args, std.io.getStdErr().writer());
     defer parsed_args.deinit();
 
-    if (parsed_args.command) |cmd| {
-        switch (cmd) {
-            .apply => std.debug.print("Apply\n", .{}),
-        }
+    const helpOpt = parsed_args.option("help").?;
+    switch (helpOpt.value) {
+        .bool => |b| {
+            if (b) {
+                try std.io.getStdOut().writer().print("Help message\n", .{});
+
+                return;
+            }
+        },
+        else => unreachable,
+    }
+
+    const versionOpt = parsed_args.option("version").?;
+    switch (versionOpt.value) {
+        .bool => |b| {
+            if (b) {
+                var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
+                const w = bw.writer();
+                try w.writeAll("reginald version " ++ build_options.version ++ "\n");
+                try w.writeAll("Licensed under the Apache License, Version 2.0: <https://www.apache.org/licenses/LICENSE-2.0>\n");
+                try bw.flush();
+
+                return;
+            }
+        },
+        else => unreachable,
     }
 }
 
