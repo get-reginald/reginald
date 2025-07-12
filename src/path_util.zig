@@ -47,6 +47,7 @@ fn expandEnvUnix(allocator: Allocator, s: []const u8, env_map: std.process.EnvMa
     var j: usize = 0;
     while (j < s.len) : (j += 1) {
         if (s[j] == '$' and j + 1 < s.len) {
+            // Add bytes up to '$'.
             for (s[i..j]) |c| {
                 buf[l] = c;
                 l += 1;
@@ -121,6 +122,7 @@ fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.En
     var j: usize = 0;
     while (j < s.len) : (j += 1) {
         if (s[j] == '%' and j + 1 < s.len) {
+            // Add bytes up to '%'.
             for (s[i..j]) |c| {
                 buf[l] = c;
                 l += 1;
@@ -130,6 +132,22 @@ fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.En
             while (k < s.len and isAlphaNum(s[k])) : (k += 1) {}
 
             if (k == j + 1) {
+                // Because stand-alone '%' is not allowed, we do a quick check if there is a '%'
+                // later in the string. That means that the variable name is invalid.
+                if (k < s.len - 1) {
+                    const percent = std.mem.indexOf(u8, s[k..], "%");
+                    if (percent) |p| {
+                        if (p == k) {
+                            // On Windows, '%%' prints '%'.
+                            buf[l] = '%';
+                            l += 1;
+                        } else {
+                            return error.InvalidVar;
+                        }
+                    }
+                }
+
+                // If there is no more %s in the code, the byte is left as is.
                 buf[l] = '%';
                 l += 1;
             } else if (s[k] == '%') {
@@ -142,6 +160,16 @@ fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.En
                     l += 1;
                 }
             } else {
+                // Because stand-alone '%' is not allowed, we do a quick check if there is a '%'
+                // later in the string. That means that the variable name is invalid.
+                if (k < s.len - 1) {
+                    for (s[k..]) |c| {
+                        if (c == '%') {
+                            return error.InvalidVar;
+                        }
+                    }
+                }
+
                 for (s[j .. k + 1]) |c| {
                     buf[l] = c;
                     l += 1;
@@ -407,6 +435,19 @@ test "expandEnv Windows" {
 
             try env.put("SOMETHING", "hello");
 
+            const path = "/tmp/%SoMEtHInG%/something_else";
+            const actual = try expandEnv(testing.allocator, path, env);
+            defer testing.allocator.free(actual);
+
+            try testing.expectEqualStrings("/tmp/hello/something_else", actual);
+        }
+
+        {
+            var env = std.process.EnvMap.init(testing.allocator);
+            defer env.deinit();
+
+            try env.put("SOMETHING", "hello");
+
             const path = "/tmp/%SOMETHIN%/something_else";
             const actual = try expandEnv(testing.allocator, path, env);
             defer testing.allocator.free(actual);
@@ -418,13 +459,22 @@ test "expandEnv Windows" {
             var env = std.process.EnvMap.init(testing.allocator);
             defer env.deinit();
 
-            try env.put("$", "PID");
-
-            const path = "/tmp/%$%/something_else";
+            const path = "/tmp/%%/something_else";
             const actual = try expandEnv(testing.allocator, path, env);
             defer testing.allocator.free(actual);
 
-            try testing.expectEqualStrings("/tmp/PID/something_else", actual);
+            try testing.expectEqualStrings("/tmp/%/something_else", actual);
+        }
+
+        {
+            var env = std.process.EnvMap.init(testing.allocator);
+            defer env.deinit();
+
+            try env.put("$", "PID");
+
+            const path = "/tmp/%$%/something_else";
+            const actual = expandEnv(testing.allocator, path, env);
+            try testing.expectError(error.InvalidVar, actual);
         }
 
         {
@@ -438,19 +488,6 @@ test "expandEnv Windows" {
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/ARG1/something_else", actual);
-        }
-
-        {
-            var env = std.process.EnvMap.init(testing.allocator);
-            defer env.deinit();
-
-            try env.put("*", "all args");
-
-            const path = "/tmp/%*%/something_else";
-            const actual = try expandEnv(testing.allocator, path, env);
-            defer testing.allocator.free(actual);
-
-            try testing.expectEqualStrings("/tmp/all args/something_else", actual);
         }
 
         {
@@ -505,6 +542,28 @@ test "expandEnv Windows" {
             defer testing.allocator.free(actual);
 
             try testing.expectEqualStrings("/tmp/hello/dir/hello", actual);
+        }
+
+        {
+            var env = std.process.EnvMap.init(testing.allocator);
+            defer env.deinit();
+
+            const path = "/tmp/%/something_else";
+            const actual = try expandEnv(testing.allocator, path, env);
+            defer testing.allocator.free(actual);
+
+            try testing.expectEqualStrings("/tmp/%/something_else", actual);
+        }
+
+        {
+            var env = std.process.EnvMap.init(testing.allocator);
+            defer env.deinit();
+
+            const path = "/tmp/%hello&/something_else";
+            const actual = try expandEnv(testing.allocator, path, env);
+            defer testing.allocator.free(actual);
+
+            try testing.expectEqualStrings("/tmp/%hello&/something_else", actual);
         }
     }
 }
