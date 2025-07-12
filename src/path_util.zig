@@ -139,19 +139,17 @@ fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.En
                     // On Windows, '%%' expands to '%'.
                     buf[l] = '%';
                     l += 1;
-
-                    continue;
-                }
-
-                // As k stops at the first character that is not valid in a variable name, the slice
-                // should now contain a valid variable name.
-                const key = s[j + 1 .. k];
-                // TODO: Right now, variables that do not exist are replaced with empty strings. Is
-                // this what we want?
-                const val = env_map.get(key) orelse "";
-                for (val) |c| {
-                    buf[l] = c;
-                    l += 1;
+                } else {
+                    // As k stops at the first character that is not valid in a variable name, the
+                    // slice should now contain a valid variable name.
+                    const key = s[j + 1 .. k];
+                    // TODO: Right now, variables that do not exist are replaced with empty strings.
+                    // Is this what we want?
+                    const val = env_map.get(key) orelse "";
+                    for (val) |c| {
+                        buf[l] = c;
+                        l += 1;
+                    }
                 }
             } else {
                 // We found an invalid character; we should check if there is a '%' somewhere later
