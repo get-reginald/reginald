@@ -21,7 +21,7 @@ pub fn expandEnv(allocator: Allocator, s: []const u8, env_map: std.process.EnvMa
     var fba = std.heap.FixedBufferAllocator.init(buf[0..]);
     const buf_allocator = fba.allocator();
 
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         if (std.mem.count(u8, out, "%") >= 2) {
             const tmp = try expandWindowsEnv(buf_allocator, out, env_map);
             out = tmp;
@@ -113,7 +113,7 @@ fn expandEnvUnix(allocator: Allocator, s: []const u8, env_map: std.process.EnvMa
 }
 
 fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.EnvMap) ![]const u8 {
-    assert(builtin.os.tag == .windows);
+    assert(builtin.target.os.tag == .windows);
 
     var buf: [512]u8 = undefined; // TODO: Is this enough?
 
@@ -379,7 +379,7 @@ test expandEnv {
 }
 
 test "expandEnv Windows" {
-    if (builtin.os.tag == .windows) {
+    if (builtin.target.os.tag == .windows) {
         {
             var env = std.process.EnvMap.init(testing.allocator);
             defer env.deinit();
