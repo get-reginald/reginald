@@ -128,29 +128,23 @@ fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.En
                 l += 1;
             }
 
+            // Should we allow more characters than just alphanumerics and underscores? Technically
+            // Windows might allow wild characters in variable names (if I'm not wrong), so should
+            // those be allowed?
             var k: usize = j + 1;
             while (k < s.len and isAlphaNum(s[k])) : (k += 1) {}
 
-            if (k == j + 1) {
-                // Because stand-alone '%' is not allowed, we do a quick check if there is a '%'
-                // later in the string. That means that the variable name is invalid.
-                if (k < s.len - 1) {
-                    const percent = std.mem.indexOf(u8, s[k..], "%");
-                    if (percent) |p| {
-                        if (p == k) {
-                            // On Windows, '%%' prints '%'.
-                            buf[l] = '%';
-                            l += 1;
-                        } else {
-                            return error.InvalidVar;
-                        }
-                    }
+            if (s[k] == '%') {
+                if (k == j + 1) {
+                    // On Windows, '%%' expands to '%'.
+                    buf[l] = '%';
+                    l += 1;
+
+                    continue;
                 }
 
-                // If there is no more %s in the code, the byte is left as is.
-                buf[l] = '%';
-                l += 1;
-            } else if (s[k] == '%') {
+                // As k stops at the first character that is not valid in a variable name, the slice
+                // should now contain a valid variable name.
                 const key = s[j + 1 .. k];
                 // TODO: Right now, variables that do not exist are replaced with empty strings. Is
                 // this what we want?
@@ -160,13 +154,11 @@ fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.En
                     l += 1;
                 }
             } else {
-                // Because stand-alone '%' is not allowed, we do a quick check if there is a '%'
-                // later in the string. That means that the variable name is invalid.
-                if (k < s.len - 1) {
-                    for (s[k..]) |c| {
-                        if (c == '%') {
-                            return error.InvalidVar;
-                        }
+                // We found an invalid character; we should check if there is a '%' somewhere later
+                // as that would construct an invalid variable name.
+                for (s[k..]) |c| {
+                    if (c == '%') {
+                        return error.InvalidVar;
                     }
                 }
 
