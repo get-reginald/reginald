@@ -40,7 +40,7 @@ pub fn expandEnv(allocator: Allocator, s: []const u8, env_map: std.process.EnvMa
 }
 
 fn expandEnvUnix(allocator: Allocator, s: []const u8, env_map: std.process.EnvMap) ![]const u8 {
-    var buf: [512]u8 = .{0} ** 512; // TODO: Is this enough?
+    var buf: [512]u8 = undefined; // TODO: Is this enough?
 
     var l: usize = 0;
     var i: usize = 0;
@@ -114,7 +114,7 @@ fn expandEnvUnix(allocator: Allocator, s: []const u8, env_map: std.process.EnvMa
 fn expandWindowsEnv(allocator: Allocator, s: []const u8, env_map: std.process.EnvMap) ![]const u8 {
     assert(builtin.os.tag == .windows);
 
-    var buf: [512]u8 = .{0}; // TODO: Is this enough?
+    var buf: [512]u8 = undefined; // TODO: Is this enough?
 
     var l: usize = 0;
     var i: usize = 0;
