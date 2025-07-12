@@ -20,7 +20,44 @@ pub fn build(b: *std.Build) !void {
     const exe_options = b.addOptions();
     exe.root_module.addOptions("build_options", exe_options);
 
-    const version_opt = b.option([]const u8, "version", "Override Reginald version string. Default is resolved from Git");
+    const env_prefix_opt = b.option(
+        []const u8,
+        "env-prefix",
+        "Override the default prefix for environment variables used by Reginald. Default is \"REGINALD_\"",
+    ) orelse "REGINALD_";
+    exe_options.addOption([]const u8, "env_prefix", env_prefix_opt);
+
+    const version_opt = b.option(
+        []const u8,
+        "version",
+        "Override Reginald version string. Default is resolved from Git",
+    );
+    const version = resolveVersion(b, version_opt) catch {
+        std.debug.print("error: resolving version failed\n", .{});
+        std.process.exit(1);
+    };
+    exe_options.addOption([:0]const u8, "version", version);
+
+    const run_cmd = b.addRunArtifact(exe);
+    run_cmd.step.dependOn(b.getInstallStep());
+
+    if (b.args) |args| {
+        run_cmd.addArgs(args);
+    }
+
+    const run_step = b.step("run", "Run the app");
+    run_step.dependOn(&run_cmd.step);
+
+    const exe_unit_tests = b.addTest(.{
+        .root_module = exe_mod,
+    });
+    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_exe_unit_tests.step);
+}
+
+fn resolveVersion(b: *std.Build, version_opt: ?[]const u8) ![:0]const u8 {
     const version_slice = if (version_opt) |v| v else v: {
         if (!std.process.can_spawn) {
             std.debug.print(
@@ -159,23 +196,6 @@ pub fn build(b: *std.Build) !void {
         }
     };
     const version = try b.allocator.dupeZ(u8, version_slice);
-    exe_options.addOption([:0]const u8, "version", version);
 
-    const run_cmd = b.addRunArtifact(exe);
-    run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    const run_step = b.step("run", "Run the app");
-    run_step.dependOn(&run_cmd.step);
-
-    const exe_unit_tests = b.addTest(.{
-        .root_module = exe_mod,
-    });
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_exe_unit_tests.step);
+    return version;
 }
