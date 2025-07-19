@@ -11,6 +11,13 @@ config: []const u8 = "",
 /// this.
 directory: []const u8 = ".",
 
+/// The maximum number of concurrent jobs to allow. If this is less than 1,
+/// unlimited concurrent jobs are allowed.
+max_jobs: i32 = -1,
+
+/// Whether quiet output is enabled.
+quiet: bool = false,
+
 /// If true, the program shows the help message and exits. When this is set to
 /// true, the actual config instance should never be loaded.
 show_help: bool = false,
@@ -18,6 +25,9 @@ show_help: bool = false,
 /// If true, the program shows the version and exits. When this is set to true,
 /// the actual config instance should never be loaded.
 show_version: bool = false,
+
+/// Whether verbose output is enabled.
+verbose: bool = false,
 
 pub const OptionMetadata = struct {
     /// Name of the long command-line option. If not set but the command-line
@@ -47,8 +57,11 @@ pub const OptionMetadata = struct {
 pub const Metadata = struct {
     config: OptionMetadata,
     directory: OptionMetadata,
+    max_jobs: OptionMetadata,
+    quiet: OptionMetadata,
     show_help: OptionMetadata,
     show_version: OptionMetadata,
+    verbose: OptionMetadata,
 };
 
 /// The metadata of the config.
@@ -61,6 +74,16 @@ pub const metadata = Metadata{
         .short = 'C',
         .description = "run Reginald as if it was started from `<path>`",
     },
+    .max_jobs = .{
+        .long = "jobs",
+        .short = 'j',
+        .description = "maximum number of jobs to run concurrently",
+        .subcommands = &[_][]const u8{"apply"},
+    },
+    .quiet = .{
+        .short = 'q',
+        .description = "silence all output expect errors",
+    },
     .show_help = .{
         .long = "help",
         .short = 'h',
@@ -71,5 +94,9 @@ pub const metadata = Metadata{
         .long = "version",
         .description = "print the version information and exit",
         .disable_env = true,
+    },
+    .verbose = .{
+        .short = 'v',
+        .description = "print more verbose output",
     },
 };

@@ -1,6 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
+const testing = std.testing;
+
+const cli = @import("cli.zig");
 
 const native_os = builtin.target.os.tag;
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -20,4 +23,11 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
     assert(args.len > 0);
+
+    var parsed_args = try cli.parseArgs(gpa, args, std.io.getStdErr().writer());
+    defer parsed_args.deinit();
+}
+
+test {
+    testing.refAllDecls(@This());
 }
