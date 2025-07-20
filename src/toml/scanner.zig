@@ -317,8 +317,6 @@ pub const Scanner = struct {
             else => |err| return err,
         };
 
-        std.debug.print("tt: {any}\n", .{token_type});
-
         switch (token_type) {
             .key => {
                 var value_list = ArrayList(u8).init(allocator);
@@ -563,25 +561,14 @@ pub const Scanner = struct {
     /// duplicate definitions.
     pub fn next(self: *@This()) NextError!Token {
         state_loop: while (true) {
-            std.debug.print("looping with state {any}\n", .{self.state});
             switch (self.state) {
                 .table => {
-                    std.debug.print("cursor: {d}, len: {d}\n", .{ self.cursor, self.input.len });
-                    std.debug.print("stakc len: {d}\n", .{self.stackHeight()});
-                    for (self.stack.items, 0..) |item, i| {
-                        std.debug.print("{any}: {d}\n", .{ item, i });
-                    }
                     if (try self.skipWsCrLnCheckEnd()) {
                         return .end_of_document;
                     }
-                    // self.skipWsCrLn();
-                    // if (self.cursor >= self.input.len and self.stackHeight() == 0) {
-                    //     return .end_of_document;
-                    // }
-                    std.debug.print("with char: {c}\n", .{self.input[self.cursor]});
+
                     switch (try self.skipWsCrLnExpectByte()) {
                         '#' => {
-                            std.debug.print("skipping comment\n", .{});
                             try self.skipComment();
                             continue;
                         },
@@ -595,8 +582,7 @@ pub const Scanner = struct {
                             // whitespace is allowed between the two square
                             // brackets.
                             if (self.input[self.cursor] == '[') {
-                                // What kind of key for array of tables
-                                // entry.
+                                self.cursor += 1;
                                 switch (try self.skipWsExpectByte()) {
                                     '-', '_', '0'...'9', 'A'...'Z', 'a'...'z' => {
                                         try self.stack.append(.key);
@@ -1212,7 +1198,7 @@ pub const Scanner = struct {
                                 self.state = .post_array_table_key;
                                 return result;
                             },
-                            '.' => {
+                            '.', ']' => {
                                 const result = Token{ .key = self.takeValueSlice() };
                                 self.state = .post_array_table_key;
                                 return result;
@@ -1419,6 +1405,60 @@ pub const Scanner = struct {
                         }
                     }
                 },
+                .post_array_table_key => {
+                    switch (try self.skipWsExpectByte()) {
+                        '.' => {
+                            self.cursor += 1;
+
+                            switch (try self.skipWsExpectByte()) {
+                                '-', '_', '0'...'9', 'A'...'Z', 'a'...'z' => {
+                                    self.value_start = self.cursor;
+                                    self.state = .array_table_key_bare;
+                                    return .array_table_key_begin;
+                                },
+                                '"' => {
+                                    self.cursor += 1;
+                                    self.value_start = self.cursor;
+                                    self.state = .array_table_key_string;
+                                    return .array_table_key_begin;
+                                },
+                                '\'' => {
+                                    self.cursor += 1;
+                                    self.value_start = self.cursor;
+                                    self.state = .array_table_key_literal_string;
+                                    return .array_table_key_begin;
+                                },
+                                else => return error.SyntaxError,
+                            }
+                        },
+                        ']' => {
+                            self.cursor += 1;
+
+                            if (self.cursor >= self.input.len) {
+                                return error.SyntaxError;
+                            }
+
+                            if (self.input[self.cursor] != ']') {
+                                return error.SyntaxError;
+                            }
+
+                            self.cursor += 1;
+
+                            const pop = self.stack.pop();
+                            if (pop == null or pop.? != .key) {
+                                return error.SyntaxError;
+                            }
+
+                            if (try self.skipWsCrLnCheckEnd()) {
+                                return .end_of_document;
+                            }
+
+                            self.state = .table;
+                            return .table_begin;
+                        },
+                        else => return error.SyntaxError,
+                    }
+                },
 
                 .inline_table => {
                     switch (try self.skipWsExpectByte()) {
@@ -1574,10 +1614,7 @@ pub const Scanner = struct {
                             self.state = .inline_table;
                             return .inline_table_begin;
                         },
-                        else => {
-                            std.debug.print("syntax error char: {c}\n", .{self.input[self.cursor]});
-                            return error.SyntaxError;
-                        },
+                        else => return error.SyntaxError,
                     }
                 },
 
@@ -2426,9 +2463,6 @@ pub const Scanner = struct {
                 },
 
                 .post_value => {
-                    for (self.stack.items, 0..) |item, i| {
-                        std.debug.print("stack items {d}: {any}\n", .{ i, item });
-                    }
                     switch (try self.skipWsCrExpectByte()) {
                         '#' => {
                             // There is no way to have a comment after a value
@@ -2438,12 +2472,10 @@ pub const Scanner = struct {
                                 return error.SyntaxError;
                             }
 
-                            std.debug.print("comment found\n", .{});
                             try self.skipComment();
                             continue :state_loop;
                         },
                         '\n' => {
-                            std.debug.print("newline\n", .{});
                             // Newline is only permitted after values in normal
                             // tables.
                             if (self.stackHeight() < 1) {
@@ -3601,12 +3633,9 @@ pub const Scanner = struct {
                         else => return error.SyntaxError,
                     }
                 },
-
-                else => unreachable,
             }
         }
 
-        // TODO: Default return.
         unreachable;
     }
 
@@ -3616,7 +3645,6 @@ pub const Scanner = struct {
         const old_cursor = self.cursor;
         defer self.cursor = old_cursor; // TODO: Stupid hack.
 
-        std.debug.print("state: {any}\n", .{self.state});
         while (true) {
             switch (self.state) {
                 .table => return try self.peekTableToken(),

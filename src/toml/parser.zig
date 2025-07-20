@@ -251,6 +251,7 @@ const TomlType = enum {
     array,
     table,
     implicit_table, // super tables in when defining subtables in table headers
+    array_table,
 };
 
 const ParseError = error{
@@ -348,8 +349,6 @@ fn parseTable(
     while (true) {
         const token = try source.next();
 
-        std.debug.print("token: {any}\n", .{token});
-
         // Parsing should always start with a beginning of a key.
         switch (token) {
             .end_of_document => break,
@@ -382,13 +381,6 @@ fn parseTable(
                 }
                 // defer allocator.free(full_key);
 
-                std.debug.print("full key: {s}\n", .{def_key});
-
-                std.debug.print("defined:\n", .{});
-                for (defined.keys()) |k| {
-                    std.debug.print("    K: {s}\n", .{k});
-                }
-
                 if (defined.contains(def_key)) {
                     return error.DuplicateKey;
                 }
@@ -419,7 +411,7 @@ fn parseTable(
                             .table => |*t| current_table = t,
                             else => unreachable,
                         }
-                        try defined.put(def, .table);
+                        try defined.put(def, .implicit_table);
                     }
                 }
 
@@ -439,9 +431,6 @@ fn parseTable(
                     .table => .table,
                 };
                 try defined.put(def_key, tt);
-
-                std.debug.print("registered: {s}\n", .{def_key});
-                std.debug.print("value: {any}\n", .{current_table.get(key_parts.items[key_parts.items.len - 1])});
             },
 
             .table_key_begin => {
@@ -455,10 +444,7 @@ fn parseTable(
                         options.max_value_len.?,
                     );
                     switch (key_token) {
-                        .key, .allocated_key => |s| {
-                            std.debug.print("a key part: {s}\n", .{s});
-                            try key_parts.append(s);
-                        },
+                        .key, .allocated_key => |s| try key_parts.append(s),
                         else => return error.SyntaxError,
                     }
 
@@ -473,14 +459,7 @@ fn parseTable(
                 const def_key = try mem.join(allocator, ".", key_parts.items);
                 // defer allocator.free(full_key);
 
-                std.debug.print("full key: {s}\n", .{def_key});
-
-                // std.debug.print("defined:\n", .{});
-                // for (defined.keys()) |k| {
-                //     std.debug.print("    K: {s}\n", .{k});
-                // }
-
-                if (defined.contains(def_key)) {
+                if (defined.contains(def_key) and defined.get(def_key).? != .implicit_table) {
                     return error.DuplicateKey;
                 }
 
@@ -495,8 +474,9 @@ fn parseTable(
                         }
                     } else {
                         const full = try mem.join(allocator, ".", key_parts.items[0 .. i + 1]);
+                        const def = try allocator.dupe(u8, full);
 
-                        if (defined.contains(full)) {
+                        if (defined.contains(def) and defined.get(def).? != .implicit_table) {
                             return error.DuplicateKey;
                         }
 
@@ -506,7 +486,7 @@ fn parseTable(
                             .table => |*t| current_table = t,
                             else => unreachable,
                         }
-                        try defined.put(full, .table);
+                        try defined.put(def, .implicit_table);
                     }
                 }
 
@@ -516,15 +496,93 @@ fn parseTable(
                     return;
                 }
             },
-            .array_table_key_begin => unreachable,
+            .array_table_key_begin => {
+                var key_parts = ArrayList([]const u8).init(allocator);
+                defer key_parts.deinit();
+
+                while (true) {
+                    const key_token = try source.nextAllocMax(
+                        allocator,
+                        .alloc_if_needed,
+                        options.max_value_len.?,
+                    );
+                    switch (key_token) {
+                        .key, .allocated_key => |s| try key_parts.append(s),
+                        else => return error.SyntaxError,
+                    }
+
+                    switch (try source.next()) {
+                        .array_table_key_begin => continue,
+                        .table_begin => break,
+                        else => return error.UnexpectedToken,
+                    }
+                }
+
+                var current_table: *Table = table;
+                const def_key = try mem.join(allocator, ".", key_parts.items);
+                // defer allocator.free(full_key);
+
+                if (defined.contains(def_key) and defined.get(def_key).? != .array_table) {
+                    return error.DuplicateKey;
+                }
+
+                var i: usize = 0;
+                while (i < key_parts.items.len - 1) : (i += 1) {
+                    const k = key_parts.items[i];
+                    if (current_table.contains(k)) {
+                        var v = current_table.get(k).?;
+                        switch (v) {
+                            .table => |*t| current_table = t,
+                            else => unreachable,
+                        }
+                    } else {
+                        const full = try mem.join(allocator, ".", key_parts.items[0 .. i + 1]);
+                        const def = try allocator.dupe(u8, full);
+
+                        const got = defined.get(def);
+                        if (defined.contains(def) and got.? != .table and got.? != .implicit_table) {
+                            return error.DuplicateKey;
+                        }
+
+                        try current_table.put(k, .{ .table = .init(allocator) });
+                        var v = current_table.get(k).?;
+                        switch (v) {
+                            .table => |*t| current_table = t,
+                            else => unreachable,
+                        }
+                        try defined.put(def, .implicit_table);
+                    }
+                }
+
+                var value_table = Table.init(allocator);
+                var table_defs = StringArrayHashMap(TomlType).init(allocator);
+                defer table_defs.deinit();
+
+                try parseTable(allocator, &value_table, null, &table_defs, source, options);
+
+                const key = key_parts.items[key_parts.items.len - 1];
+                var array = Array.init(allocator);
+                if (current_table.get(key)) |value| {
+                    switch (value) {
+                        .array => |a| {
+                            try array.appendSlice(a.items);
+                            a.deinit();
+                        },
+                        else => return error.UnexpectedToken,
+                    }
+                }
+                try array.append(.{ .table = value_table });
+                try current_table.put(key, .{ .array = array });
+
+                try defined.put(def_key, .array_table);
+            },
+
             // Checking this here is the simplest way to make a clean exit from
             // the parsing. The scanner does not make up this token and it comes
             // instead of a key.
             .inline_table_end => return,
-            else => {
-                std.debug.print("error token: {any}\n", .{token});
-                return error.UnexpectedToken;
-            },
+
+            else => return error.UnexpectedToken,
         }
     }
 }
@@ -538,9 +596,6 @@ fn parseValue(
 ) ParseError!?Value {
     const token = try source.nextAllocMax(allocator, .alloc_if_needed, options.max_value_len.?);
     defer freeAllocated(allocator, token);
-
-    std.debug.print("got token: {any}\n", .{token});
-    std.debug.print("parent_key: {s}\n", .{parent_key orelse "null"});
 
     switch (token) {
         .string, .allocated_string => |slice| {
@@ -576,7 +631,6 @@ fn parseValue(
             return .{ .datetime = try Datetime.parse(slice) };
         },
         .array_begin => {
-            std.debug.print("array begin\n", .{});
             var array = Array.init(allocator);
             while (true) {
                 var array_defined = StringArrayHashMap(TomlType).init(allocator);
@@ -592,7 +646,6 @@ fn parseValue(
             return .{ .array = array };
         },
         .inline_table_begin => {
-            std.debug.print("inline table begin\n", .{});
             var t = Table.init(allocator);
             try parseTable(allocator, &t, parent_key, defined, source, options);
             return .{ .table = t };
