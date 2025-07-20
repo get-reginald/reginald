@@ -4,11 +4,16 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
+const fs = std.fs;
+const mem = std.mem;
+const process = std.process;
 const testing = std.testing;
+
+const ExpandError = Allocator.Error || process.GetEnvVarOwnedError;
 
 /// Expand environment variables and user home directory in the string in that
 /// order. Caller owns the result and should call `free` on it.
-pub fn expand(allocator: Allocator, s: []const u8) ![]const u8 {
+pub fn expand(allocator: Allocator, s: []const u8) ExpandError![]const u8 {
     const tmp = try expandEnv(allocator, s);
     defer allocator.free(tmp);
 
@@ -21,7 +26,7 @@ pub fn expand(allocator: Allocator, s: []const u8) ![]const u8 {
 /// Unix-style variables are supported.
 ///
 /// Caller owns the result and should call `free` on it.
-pub fn expandEnv(allocator: Allocator, s: []const u8) ![]const u8 {
+pub fn expandEnv(allocator: Allocator, s: []const u8) ExpandError![]const u8 {
     var out: []const u8 = s;
     var buf: [4096]u8 = undefined; // TODO: Is this enough?
 
@@ -31,7 +36,7 @@ pub fn expandEnv(allocator: Allocator, s: []const u8) ![]const u8 {
     const buf_allocator = fba.allocator();
 
     if (comptime builtin.target.os.tag == .windows) {
-        if (std.mem.count(u8, out, "%") >= 2) {
+        if (mem.count(u8, out, "%") >= 2) {
             const tmp = try expandWindowsEnv(buf_allocator, out);
             out = tmp;
 
@@ -56,7 +61,7 @@ pub fn expandEnv(allocator: Allocator, s: []const u8) ![]const u8 {
 /// resolved from environment variables.
 ///
 /// Caller owns the result and should call `free` on it.
-pub fn expandUser(allocator: Allocator, s: []const u8) ![]const u8 {
+pub fn expandUser(allocator: Allocator, s: []const u8) ExpandError![]const u8 {
     var buf: [1024]u8 = undefined; // TODO: Is this enough?
 
     // The buffer goes out of scope, so no need to free the temporary
@@ -65,24 +70,24 @@ pub fn expandUser(allocator: Allocator, s: []const u8) ![]const u8 {
     const buf_allocator = fba.allocator();
 
     const home = if (comptime builtin.target.os.tag == .windows)
-        try std.process.getEnvVarOwned(buf_allocator, "USERPROFILE")
+        try process.getEnvVarOwned(buf_allocator, "USERPROFILE")
     else
-        try std.process.getEnvVarOwned(buf_allocator, "HOME");
+        try process.getEnvVarOwned(buf_allocator, "HOME");
 
-    if (std.mem.eql(u8, s, "~")) {
+    if (mem.eql(u8, s, "~")) {
         return try allocator.dupe(u8, home);
     }
 
-    if (std.mem.startsWith(u8, s, "~")) {
-        if (std.fs.path.isSep(s[1])) {
-            return try std.fs.path.join(allocator, &[_][]const u8{ home, s[2..] });
+    if (mem.startsWith(u8, s, "~")) {
+        if (fs.path.isSep(s[1])) {
+            return try fs.path.join(allocator, &[_][]const u8{ home, s[2..] });
         } else {
             // We naively assume that all of the user home directories follow
             // the same pattern, which is almost always correct.
             var i: ?usize = null;
             var k: usize = 0;
             while (k < s.len) : (k += 1) {
-                if (std.fs.path.isSep(s[k])) {
+                if (fs.path.isSep(s[k])) {
                     i = k;
                     break;
                 }
@@ -90,12 +95,12 @@ pub fn expandUser(allocator: Allocator, s: []const u8) ![]const u8 {
 
             const user = if (i) |j| s[1..j] else s[1..];
             // TODO: We should really be checking this.
-            const users = std.fs.path.dirname(home).?;
+            const users = fs.path.dirname(home).?;
 
             if (i) |j| {
-                return try std.fs.path.join(allocator, &[_][]const u8{ users, user, s[j + 1 ..] });
+                return try fs.path.join(allocator, &[_][]const u8{ users, user, s[j + 1 ..] });
             } else {
-                return try std.fs.path.join(allocator, &[_][]const u8{ users, user });
+                return try fs.path.join(allocator, &[_][]const u8{ users, user });
             }
         }
     }
@@ -103,7 +108,7 @@ pub fn expandUser(allocator: Allocator, s: []const u8) ![]const u8 {
     return try allocator.dupe(u8, s);
 }
 
-fn expandEnvUnix(allocator: Allocator, s: []const u8) ![]const u8 {
+fn expandEnvUnix(allocator: Allocator, s: []const u8) ExpandError![]const u8 {
     var buf: [512]u8 = undefined; // TODO: Is this enough?
 
     var l: usize = 0;
@@ -148,14 +153,14 @@ fn expandEnvUnix(allocator: Allocator, s: []const u8) ![]const u8 {
                 break :blk .{ t[0..k], k };
             };
 
-            if (std.mem.eql(u8, name, "") and w > 0) {
+            if (mem.eql(u8, name, "") and w > 0) {
                 // Invalid syntax, eat the characters.
-            } else if (std.mem.eql(u8, name, "")) {
+            } else if (mem.eql(u8, name, "")) {
                 // `$` is not followed by a name, so leave it in.
                 buf[l] = s[j];
                 l += 1;
             } else {
-                const val = std.process.getEnvVarOwned(allocator, name) catch "";
+                const val = process.getEnvVarOwned(allocator, name) catch "";
                 defer allocator.free(val);
                 for (val) |c| {
                     buf[l] = c;
@@ -172,10 +177,10 @@ fn expandEnvUnix(allocator: Allocator, s: []const u8) ![]const u8 {
         return s;
     }
 
-    return try std.mem.concat(allocator, u8, &[_][]const u8{ buf[0..l], s[i..] });
+    return try mem.concat(allocator, u8, &[_][]const u8{ buf[0..l], s[i..] });
 }
 
-fn expandWindowsEnv(allocator: Allocator, s: []const u8) ![]const u8 {
+fn expandWindowsEnv(allocator: Allocator, s: []const u8) ExpandError![]const u8 {
     assert(comptime builtin.target.os.tag == .windows);
 
     var buf: [512]u8 = undefined; // TODO: Is this enough?
@@ -207,7 +212,7 @@ fn expandWindowsEnv(allocator: Allocator, s: []const u8) ![]const u8 {
                     // a variable name, the slice should now contain a valid
                     // variable name.
                     const key = s[j + 1 .. k];
-                    const val = std.process.getEnvVarOwned(allocator, key) catch "";
+                    const val = process.getEnvVarOwned(allocator, key) catch "";
                     defer allocator.free(val);
                     for (val) |c| {
                         buf[l] = c;
@@ -239,7 +244,7 @@ fn expandWindowsEnv(allocator: Allocator, s: []const u8) ![]const u8 {
         return s;
     }
 
-    return try std.mem.concat(allocator, u8, &[_][]const u8{ buf[0..l], s[i..] });
+    return try mem.concat(allocator, u8, &[_][]const u8{ buf[0..l], s[i..] });
 }
 
 fn isAlphaNum(c: u8) bool {
