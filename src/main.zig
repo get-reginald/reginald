@@ -84,6 +84,18 @@ pub fn main() !void {
     defer if (wd_path) |s| {
         gpa.free(s);
     };
+
+    const cfg_file = Config.loadFile(gpa, parsed_args.option("config").?, wd_path) catch |err| {
+        switch (err) {
+            error.FileNotFound, error.IsDir => {
+                try std.io.getStdErr().writer().print("config file not found\n", .{});
+
+                return err;
+            },
+            else => return err,
+        }
+    };
+    defer gpa.free(cfg_file);
 }
 
 /// Resolve the working directory of the current run. Caller owns the return
