@@ -8,6 +8,7 @@ const testing = std.testing;
 const cli = @import("cli.zig");
 const Config = @import("Config.zig");
 const filepath = @import("filepath.zig");
+const toml = @import("toml.zig");
 
 const native_os = builtin.target.os.tag;
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
@@ -96,6 +97,9 @@ pub fn main() !void {
         }
     };
     defer gpa.free(cfg_file);
+
+    var p = try toml.parseFromSlice(gpa, cfg_file, .{});
+    defer p.deinit();
 }
 
 /// Resolve the working directory of the current run. Caller owns the return
