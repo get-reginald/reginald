@@ -10,10 +10,20 @@ const testing = std.testing;
 
 const Config = @import("Config.zig");
 
-const InvalidArgs = error.InvalidArgs;
+const ParseError = Allocator.Error || error{InvalidArgs};
 
 pub const global_opts = generateOptionsFor(null);
 pub const apply_opts = generateOptionsFor("apply");
+
+/// What to do when the command-line parser finds an unknown argument.
+pub const OnUnknown = enum {
+    /// With `fail`, the parser fails immediately and returns an error.
+    fail,
+
+    /// With `collect`, the parser collects the unknown arguments as long as
+    /// possible and returns what it was able to parse.
+    collect,
+};
 
 /// Value of a command-line option.
 const OptionValue = union(enum) {
@@ -64,7 +74,7 @@ pub const Option = struct {
         if (self.changed) {
             try writer.print("option `--{s}` can be specified only once\n", .{name});
 
-            return InvalidArgs;
+            return error.InvalidArgs;
         }
 
         switch (self.value) {
@@ -80,7 +90,7 @@ pub const Option = struct {
                 const b = parseBool(s[name.len + 1 ..]) catch {
                     try writer.print("invalid value for option `--{s}`: {s}\n", .{ name, s[name.len + 1 ..] });
 
-                    return InvalidArgs;
+                    return error.InvalidArgs;
                 };
 
                 try self.setValue(allocator, b);
@@ -94,7 +104,7 @@ pub const Option = struct {
                     const n = std.fmt.parseInt(i32, v, 0) catch {
                         try writer.print("value for option `--{s}` is not an integer: {s}\n", .{ name, v });
 
-                        return InvalidArgs;
+                        return error.InvalidArgs;
                     };
 
                     try self.setValue(allocator, n);
@@ -105,7 +115,7 @@ pub const Option = struct {
                 if (args.len < 2) {
                     try writer.print("option `--{s}` requires a value", .{name});
 
-                    return InvalidArgs;
+                    return error.InvalidArgs;
                 }
 
                 const v = args[1];
@@ -113,7 +123,7 @@ pub const Option = struct {
                 const n = std.fmt.parseInt(i32, v, 0) catch {
                     try writer.print("value for option `--{s}` is not an integer: {s}\n", .{ name, v });
 
-                    return InvalidArgs;
+                    return error.InvalidArgs;
                 };
 
                 try self.setValue(allocator, n);
@@ -137,7 +147,7 @@ pub const Option = struct {
                 if (args.len < 2) {
                     try writer.print("option `--{s}` requires a value", .{name});
 
-                    return InvalidArgs;
+                    return error.InvalidArgs;
                 }
 
                 const v = args[1];
@@ -199,6 +209,9 @@ pub const ParsedArgs = struct {
     /// Current set of command-line options.
     options: ArrayList(Option),
 
+    /// Unknown arguments found.
+    unknown: ?ArrayList(UnknownArgument),
+
     /// Free the memory used by ParsedArgs.
     pub fn deinit(self: *@This()) void {
         for (self.options.items) |*o| {
@@ -214,6 +227,10 @@ pub const ParsedArgs = struct {
         }
 
         self.options.deinit();
+
+        if (self.unknown) |unknown| {
+            unknown.deinit();
+        }
 
         // if (self.command) |*cmd| {
         //     switch (cmd.*) {
@@ -245,6 +262,26 @@ pub const ParsedArgs = struct {
     }
 };
 
+const UnknownOptionName = union(enum) {
+    long: []const u8,
+    short: u8,
+};
+
+/// Unknown command-line argument that was encountered during the parsing.
+const UnknownArgument = struct {
+    /// Index of the argument.
+    pos: usize,
+
+    /// Argument that was or contains the unknown argument.
+    arg: []const u8,
+
+    /// If the unknown argument was a command-line option, this is the name of
+    /// it as found in the command-line arguments. Especially useful if
+    /// an unknown option was found in an argument that contains multiple short
+    /// options.
+    option_name: ?UnknownOptionName,
+};
+
 /// Parse command-line arguments from iter and return the parsed arguments.
 /// The writer is used for printing more detailed error messages if the user has
 /// given invalid arguments.
@@ -252,11 +289,20 @@ pub const ParsedArgs = struct {
 /// The caller must call `deinit` on the returned result.
 ///
 /// TODO: Add a second pass that checks for the plugin arguments.
-pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype) !ParsedArgs {
+pub fn parseArgs(
+    allocator: Allocator,
+    args: []const []const u8,
+    writer: anytype,
+    on_unknown: OnUnknown,
+) (ParseError || @TypeOf(writer).Error)!ParsedArgs {
     var result: ParsedArgs = .{
         .allocator = allocator,
         .command = null,
         .options = .init(allocator),
+        .unknown = switch (on_unknown) {
+            .collect => .init(allocator),
+            .fail => null,
+        },
     };
     try result.options.appendSlice(&global_opts);
     errdefer result.deinit();
@@ -282,9 +328,19 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
             const s = arg[2..];
             const name = if (std.mem.indexOf(u8, s, "=")) |j| s[0..j] else s;
 
-            var opt = result.option(name) orelse {
-                try writer.print("invalid command-line option `--{s}`\n", .{name});
-                return InvalidArgs;
+            var opt = result.option(name) orelse switch (on_unknown) {
+                .collect => {
+                    try result.unknown.?.append(.{
+                        .pos = i,
+                        .arg = arg,
+                        .option_name = .{ .long = name },
+                    });
+                    continue;
+                },
+                .fail => {
+                    try writer.print("invalid command-line option `--{s}`\n", .{name});
+                    return error.InvalidArgs;
+                },
             };
 
             const used = try opt.parseLong(allocator, args[i..], writer);
@@ -300,9 +356,19 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
             while (j < arg.len) : (j += 1) {
                 const c = arg[j];
 
-                var opt = result.optionForShort(c) orelse {
-                    try writer.print("invalid command-line option `-{c}` in `{s}`\n", .{ c, arg });
-                    return InvalidArgs;
+                var opt = result.optionForShort(c) orelse switch (on_unknown) {
+                    .collect => {
+                        try result.unknown.?.append(.{
+                            .pos = i,
+                            .arg = arg,
+                            .option_name = .{ .short = c },
+                        });
+                        continue;
+                    },
+                    .fail => {
+                        try writer.print("invalid command-line option `-{c}` in `{s}`\n", .{ c, arg });
+                        return error.InvalidArgs;
+                    },
                 };
 
                 // TODO: If we implement count or list type options, this needs
@@ -310,7 +376,7 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
                 if (opt.changed) {
                     try writer.print("option `--{s}` can be specified only once\n", .{opt.name});
 
-                    return InvalidArgs;
+                    return error.InvalidArgs;
                 }
 
                 // Inline this parsing so we can check all of the options in
@@ -322,7 +388,7 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
                             const b = parseBool(v) catch {
                                 try writer.print("invalid value for option `-{c}` in `{s}`: {s}\n", .{ c, arg, v });
 
-                                return InvalidArgs;
+                                return error.InvalidArgs;
                             };
 
                             try opt.setValue(allocator, b);
@@ -340,7 +406,7 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
                             const n = std.fmt.parseInt(i32, v, 0) catch {
                                 try writer.print("value for option `-{c}` is not an integer: {s}\n", .{ c, v });
 
-                                return InvalidArgs;
+                                return error.InvalidArgs;
                             };
 
                             try opt.setValue(allocator, n);
@@ -355,7 +421,7 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
                             const n = std.fmt.parseInt(i32, v, 0) catch {
                                 try writer.print("value for option `-{c}` is not an integer: {s}\n", .{ c, v });
 
-                                return InvalidArgs;
+                                return error.InvalidArgs;
                             };
 
                             try opt.setValue(allocator, n);
@@ -366,7 +432,7 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
                         if (args.len <= i + 1) {
                             try writer.print("option `-{c}` requires a value\n", .{c});
 
-                            return InvalidArgs;
+                            return error.InvalidArgs;
                         }
 
                         i += 1;
@@ -376,7 +442,7 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
                         const n = std.fmt.parseInt(i32, v, 0) catch {
                             try writer.print("value for option `-{c}` is not an integer: {s}\n", .{ c, v });
 
-                            return InvalidArgs;
+                            return error.InvalidArgs;
                         };
 
                         try opt.setValue(allocator, n);
@@ -415,7 +481,7 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
                         if (args.len <= i + 1) {
                             try writer.print("option `-{c}` requires a value\n", .{c});
 
-                            return InvalidArgs;
+                            return error.InvalidArgs;
                         }
 
                         i += 1;
@@ -437,10 +503,19 @@ pub fn parseArgs(allocator: Allocator, args: []const []const u8, writer: anytype
                     try result.options.appendSlice(&apply_opts);
                 },
             }
-        } else {
-            try writer.print("invalid argument: {s}\n", .{arg});
-
-            return InvalidArgs;
+        } else switch (on_unknown) {
+            .collect => {
+                try result.unknown.?.append(.{
+                    .pos = i,
+                    .arg = arg,
+                    .option_name = null,
+                });
+                continue;
+            },
+            .fail => {
+                try writer.print("invalid argument: {s}\n", .{arg});
+                return error.InvalidArgs;
+            },
         }
     }
 
@@ -546,7 +621,7 @@ fn parseBool(a: []const u8) !bool {
 
 test "no options" {
     const args = [_][:0]const u8{"reginald"};
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(!parsed.option("verbose").?.changed);
@@ -555,11 +630,12 @@ test "no options" {
     try testing.expect(!parsed.option("config").?.changed);
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "stop parsing at `--`" {
     const args = [_][:0]const u8{ "reginald", "--verbose", "--", "--quiet" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("verbose").?.changed);
@@ -569,11 +645,12 @@ test "stop parsing at `--`" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "bool option" {
     const args = [_][:0]const u8{ "reginald", "--verbose" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("verbose").?.changed);
@@ -583,11 +660,12 @@ test "bool option" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "bool option value" {
     const args = [_][:0]const u8{ "reginald", "--verbose=false", "--quiet=true" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("verbose").?.changed);
@@ -598,31 +676,32 @@ test "bool option value" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("verbose").?.value.bool);
     try testing.expect(parsed.option("quiet").?.value.bool);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "bool option invalid value" {
     const args = [_][:0]const u8{ "reginald", "--verbose=false", "--quiet=something" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
 
-    try testing.expectError(InvalidArgs, parsed);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "bool option empty value" {
     const args = [_][:0]const u8{ "reginald", "--verbose=" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
 
-    try testing.expectError(InvalidArgs, parsed);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "duplicate bool" {
     const args = [_][:0]const u8{ "reginald", "--quiet", "--quiet" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
-    try testing.expectError(InvalidArgs, parsed);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "string option" {
     const args = [_][:0]const u8{ "reginald", "--config", "/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -632,6 +711,7 @@ test "string option" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "multiple string options" {
@@ -642,7 +722,7 @@ test "multiple string options" {
         "--directory",
         "/tmp",
     };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -653,11 +733,12 @@ test "multiple string options" {
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
     try testing.expect(std.mem.eql(u8, parsed.option("directory").?.value.string, "/tmp"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "string option equals sign" {
     const args = [_][:0]const u8{ "reginald", "--config=/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -667,11 +748,12 @@ test "string option equals sign" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "string option equals sign quoted" {
     const args = [_][:0]const u8{ "reginald", "--config=\"/tmp/config.toml\"" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -681,17 +763,18 @@ test "string option equals sign quoted" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "string option no value" {
     const args = [_][:0]const u8{ "reginald", "--config" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
-    try testing.expectError(InvalidArgs, parsed);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "bool and string option" {
     const args = [_][:0]const u8{ "reginald", "--config", "/tmp/config.toml", "--verbose" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -702,11 +785,12 @@ test "bool and string option" {
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
     try testing.expect(parsed.option("verbose").?.value.bool);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "string option mixed" {
     const args = [_][:0]const u8{ "reginald", "--directory=/tmp", "--config", "/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -717,11 +801,12 @@ test "string option mixed" {
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
     try testing.expect(std.mem.eql(u8, parsed.option("directory").?.value.string, "/tmp"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "invalid string order" {
     const args = [_][:0]const u8{ "reginald", "--config", "--verbose" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -731,18 +816,19 @@ test "invalid string order" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "--verbose"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "invalid long option" {
     const args = [_][:0]const u8{ "reginald", "--cfg" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
 
-    try testing.expectError(InvalidArgs, parsed);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "short bool option" {
     const args = [_][:0]const u8{ "reginald", "-v" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("verbose").?.changed);
@@ -752,11 +838,12 @@ test "short bool option" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short bool option value" {
     const args = [_][:0]const u8{ "reginald", "-v=false", "-q=true" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("verbose").?.changed);
@@ -767,11 +854,12 @@ test "short bool option value" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("verbose").?.value.bool);
     try testing.expect(parsed.option("quiet").?.value.bool);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short bool option combined" {
     const args = [_][:0]const u8{ "reginald", "-qv" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("verbose").?.changed);
@@ -782,11 +870,12 @@ test "short bool option combined" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
     try testing.expect(parsed.option("quiet").?.value.bool);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short bool option combined last value" {
     const args = [_][:0]const u8{ "reginald", "-qv=false" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("verbose").?.changed);
@@ -797,25 +886,26 @@ test "short bool option combined last value" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("verbose").?.value.bool);
     try testing.expect(parsed.option("quiet").?.value.bool);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short bool option invalid value" {
     const args = [_][:0]const u8{ "reginald", "-v=false", "-q=something" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
 
-    try testing.expectError(InvalidArgs, parsed);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "short bool option empty value" {
     const args = [_][:0]const u8{ "reginald", "-v=" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
 
-    try testing.expectError(InvalidArgs, parsed);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "short string option" {
     const args = [_][:0]const u8{ "reginald", "-c", "/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -825,11 +915,12 @@ test "short string option" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(!parsed.option("quiet").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short string option value" {
     const args = [_][:0]const u8{ "reginald", "-c=/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -839,11 +930,12 @@ test "short string option value" {
     try testing.expect(!parsed.option("help").?.changed);
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short string option value merged" {
     const args = [_][:0]const u8{ "reginald", "-c/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -853,11 +945,12 @@ test "short string option value merged" {
     try testing.expect(!parsed.option("help").?.changed);
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short string option empty quoted value" {
     const args = [_][:0]const u8{ "reginald", "-c=\"\"" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -867,11 +960,12 @@ test "short string option empty quoted value" {
     try testing.expect(!parsed.option("help").?.changed);
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, ""));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short option combined" {
     const args = [_][:0]const u8{ "reginald", "-vc", "/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -882,11 +976,12 @@ test "short option combined" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short option combined value" {
     const args = [_][:0]const u8{ "reginald", "-vc=/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -897,11 +992,12 @@ test "short option combined value" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short option combined value merged" {
     const args = [_][:0]const u8{ "reginald", "-vc/tmp/config.toml" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -912,11 +1008,12 @@ test "short option combined value merged" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short option combined value merged quoted" {
     const args = [_][:0]const u8{ "reginald", "-vc\"/tmp/config.toml\"" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -927,11 +1024,12 @@ test "short option combined value merged quoted" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, "/tmp/config.toml"));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short option combined value merged empty quoted" {
     const args = [_][:0]const u8{ "reginald", "-vc\"\"" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.option("config").?.changed);
@@ -942,23 +1040,24 @@ test "short option combined value merged empty quoted" {
     try testing.expect(!parsed.option("directory").?.changed);
     try testing.expect(parsed.option("verbose").?.value.bool);
     try testing.expect(std.mem.eql(u8, parsed.option("config").?.value.string, ""));
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "short option combined no value" {
     const args = [_][:0]const u8{ "reginald", "-vc" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
-    try testing.expectError(InvalidArgs, parsed);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "invalid empty short" {
     const args = [_][:0]const u8{ "reginald", "-" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
-    try testing.expectError(InvalidArgs, parsed);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
+    try testing.expectError(error.InvalidArgs, parsed);
 }
 
 test "subcommand apply" {
     const args = [_][:0]const u8{ "reginald", "apply" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.command != null);
@@ -971,7 +1070,7 @@ test "subcommand apply" {
 
 test "subcommand int option" {
     const args = [_][:0]const u8{ "reginald", "apply", "--jobs", "20" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.command != null);
@@ -983,11 +1082,12 @@ test "subcommand int option" {
 
     try testing.expectEqual(parsed.option("jobs").?.changed, true);
     try testing.expectEqual(parsed.option("jobs").?.value.int, 20);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "subcommand global option before" {
     const args = [_][:0]const u8{ "reginald", "--verbose", "apply", "--jobs", "20" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.command != null);
@@ -1001,11 +1101,12 @@ test "subcommand global option before" {
     try testing.expectEqual(parsed.option("jobs").?.changed, true);
     try testing.expectEqual(parsed.option("verbose").?.value.bool, true);
     try testing.expectEqual(parsed.option("jobs").?.value.int, 20);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "subcommand global option after" {
     const args = [_][:0]const u8{ "reginald", "apply", "--verbose", "--jobs", "20" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.command != null);
@@ -1019,11 +1120,12 @@ test "subcommand global option after" {
     try testing.expectEqual(parsed.option("jobs").?.changed, true);
     try testing.expectEqual(parsed.option("verbose").?.value.bool, true);
     try testing.expectEqual(parsed.option("jobs").?.value.int, 20);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "subcommand global option both" {
     const args = [_][:0]const u8{ "reginald", "--quiet", "apply", "--verbose", "--jobs", "20" };
-    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer);
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
     defer parsed.deinit();
 
     try testing.expect(parsed.command != null);
@@ -1039,10 +1141,126 @@ test "subcommand global option both" {
     try testing.expectEqual(parsed.option("verbose").?.value.bool, true);
     try testing.expectEqual(parsed.option("quiet").?.value.bool, true);
     try testing.expectEqual(parsed.option("jobs").?.value.int, 20);
+    try testing.expectEqual(parsed.unknown, null);
 }
 
 test "subcommand option before" {
     const args = [_][:0]const u8{ "reginald", "--verbose", "--jobs", "20", "apply" };
-    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer);
-    try testing.expectError(InvalidArgs, parsed);
+    const parsed = parseArgs(testing.allocator, &args, std.io.null_writer, .fail);
+    try testing.expectError(error.InvalidArgs, parsed);
+}
+
+test "no unknown" {
+    const args = [_][:0]const u8{ "reginald", "apply", "--verbose", "--jobs", "40" };
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .collect);
+    defer parsed.deinit();
+
+    try testing.expect(parsed.command != null);
+
+    // TODO: This definitely makes more sense when there are more commands.
+    switch (parsed.command.?) {
+        .apply => try testing.expect(true),
+    }
+
+    try testing.expectEqual(parsed.option("verbose").?.changed, true);
+    try testing.expectEqual(parsed.option("jobs").?.changed, true);
+    try testing.expectEqual(parsed.option("verbose").?.value.bool, true);
+    try testing.expectEqual(parsed.option("jobs").?.value.int, 40);
+    try testing.expect(parsed.unknown != null);
+    try testing.expectEqual(parsed.unknown.?.items.len, 0);
+}
+
+test "unknown long option" {
+    const args = [_][:0]const u8{ "reginald", "--not-real", "--verbose" };
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .collect);
+    defer parsed.deinit();
+
+    try testing.expect(parsed.option("verbose").?.changed);
+    try testing.expect(!parsed.option("version").?.changed);
+    try testing.expect(!parsed.option("help").?.changed);
+    try testing.expect(!parsed.option("config").?.changed);
+    try testing.expect(!parsed.option("directory").?.changed);
+    try testing.expect(!parsed.option("quiet").?.changed);
+    try testing.expect(parsed.option("verbose").?.value.bool);
+    try testing.expect(parsed.unknown != null);
+    try testing.expectEqual(parsed.unknown.?.items.len, 1);
+    const u = parsed.unknown.?.items[0];
+    try testing.expectEqual(u.pos, 1);
+    try testing.expectEqual(u.arg, "--not-real");
+    try testing.expectEqualSlices(u8, u.option_name.?.long, "not-real");
+}
+
+test "unknown short option" {
+    const args = [_][:0]const u8{ "reginald", "--verbose", "-ah" };
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .collect);
+    defer parsed.deinit();
+
+    try testing.expect(parsed.option("help").?.changed);
+    try testing.expect(parsed.option("verbose").?.changed);
+    try testing.expect(!parsed.option("version").?.changed);
+    try testing.expect(!parsed.option("config").?.changed);
+    try testing.expect(!parsed.option("directory").?.changed);
+    try testing.expect(!parsed.option("quiet").?.changed);
+    try testing.expect(parsed.option("help").?.value.bool);
+    try testing.expect(parsed.option("verbose").?.value.bool);
+    try testing.expect(parsed.unknown != null);
+    try testing.expectEqual(parsed.unknown.?.items.len, 1);
+    const u = parsed.unknown.?.items[0];
+    try testing.expectEqual(u.pos, 2);
+    try testing.expectEqual(u.arg, "-ah");
+    try testing.expectEqual(u.option_name.?.short, 'a');
+}
+
+test "unknown arg" {
+    const args = [_][:0]const u8{ "reginald", "--verbose", "-h", "not-real" };
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .collect);
+    defer parsed.deinit();
+
+    try testing.expect(parsed.option("help").?.changed);
+    try testing.expect(parsed.option("verbose").?.changed);
+    try testing.expect(!parsed.option("version").?.changed);
+    try testing.expect(!parsed.option("config").?.changed);
+    try testing.expect(!parsed.option("directory").?.changed);
+    try testing.expect(!parsed.option("quiet").?.changed);
+    try testing.expect(parsed.option("help").?.value.bool);
+    try testing.expect(parsed.option("verbose").?.value.bool);
+    try testing.expect(parsed.unknown != null);
+    try testing.expectEqual(parsed.unknown.?.items.len, 1);
+    const u = parsed.unknown.?.items[0];
+    try testing.expectEqual(u.pos, 3);
+    try testing.expectEqual(u.arg, "not-real");
+    try testing.expectEqual(u.option_name, null);
+}
+
+test "multiple unknown" {
+    const args = [_][:0]const u8{ "reginald", "--not-real", "--verbose", "-ah", "unreal", "-b" };
+    var parsed = try parseArgs(testing.allocator, &args, std.io.null_writer, .collect);
+    defer parsed.deinit();
+
+    try testing.expect(parsed.option("help").?.changed);
+    try testing.expect(parsed.option("verbose").?.changed);
+    try testing.expect(!parsed.option("version").?.changed);
+    try testing.expect(!parsed.option("config").?.changed);
+    try testing.expect(!parsed.option("directory").?.changed);
+    try testing.expect(!parsed.option("quiet").?.changed);
+    try testing.expect(parsed.option("help").?.value.bool);
+    try testing.expect(parsed.option("verbose").?.value.bool);
+    try testing.expect(parsed.unknown != null);
+    try testing.expectEqual(parsed.unknown.?.items.len, 4);
+    var u = parsed.unknown.?.items[0];
+    try testing.expectEqual(u.pos, 1);
+    try testing.expectEqual(u.arg, "--not-real");
+    try testing.expectEqualSlices(u8, u.option_name.?.long, "not-real");
+    u = parsed.unknown.?.items[1];
+    try testing.expectEqual(u.pos, 3);
+    try testing.expectEqual(u.arg, "-ah");
+    try testing.expectEqual(u.option_name.?.short, 'a');
+    u = parsed.unknown.?.items[2];
+    try testing.expectEqual(u.pos, 4);
+    try testing.expectEqual(u.arg, "unreal");
+    try testing.expectEqual(u.option_name, null);
+    u = parsed.unknown.?.items[3];
+    try testing.expectEqual(u.pos, 5);
+    try testing.expectEqual(u.arg, "-b");
+    try testing.expectEqual(u.option_name.?.short, 'b');
 }

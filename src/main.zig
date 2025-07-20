@@ -24,7 +24,9 @@ pub fn main() !void {
     defer std.process.argsFree(gpa, args);
     assert(args.len > 0);
 
-    var parsed_args = try cli.parseArgs(gpa, args, std.io.getStdErr().writer());
+    // Errors from parsing are ignored for now and the errors are checked after
+    // loading plugins.
+    var parsed_args = try cli.parseArgs(gpa, args, std.io.getStdErr().writer(), .collect);
     defer parsed_args.deinit();
 }
 
