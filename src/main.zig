@@ -1,14 +1,35 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 const assert = std.debug.assert;
 const testing = std.testing;
 
 const cli = @import("cli.zig");
+const Config = @import("Config.zig");
 
 const native_os = builtin.target.os.tag;
 var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
 
 pub fn main() !void {
+    // TODO: It could be ok to remove these safety checks.
+    comptime {
+        if (std.meta.fields(Config).len != std.meta.fields(Config.Metadata).len) {
+            @compileError("number of fields in config metadata does not match the config");
+        }
+
+        for (std.meta.fields(Config)) |field| {
+            if (!@hasField(Config.Metadata, field.name)) {
+                @compileError("config field " ++ field.name ++ " not present in metadata");
+            }
+        }
+
+        for (std.meta.fields(Config.Metadata)) |field| {
+            if (!@hasField(Config, field.name)) {
+                @compileError("metadata field " ++ field.name ++ " not present in config");
+            }
+        }
+    }
+
     const gpa, const is_debug = gpa: {
         if (native_os == .wasi) break :gpa .{ std.heap.wasm_allocator, false };
         break :gpa switch (builtin.mode) {
@@ -28,6 +49,34 @@ pub fn main() !void {
     // loading plugins.
     var parsed_args = try cli.parseArgs(gpa, args, std.io.getStdErr().writer(), .collect);
     defer parsed_args.deinit();
+
+    const help_opt = parsed_args.option("help").?;
+    switch (help_opt.value) {
+        .bool => |b| {
+            if (b) {
+                try std.io.getStdOut().writer().print("Help message\n", .{});
+
+                return;
+            }
+        },
+        else => unreachable,
+    }
+
+    const version_opt = parsed_args.option("version").?;
+    switch (version_opt.value) {
+        .bool => |b| {
+            if (b) {
+                var bw = std.io.bufferedWriter(std.io.getStdOut().writer());
+                const w = bw.writer();
+                try w.writeAll("reginald version " ++ build_options.version ++ "\n");
+                try w.writeAll("Licensed under the Apache License, Version 2.0: <https://www.apache.org/licenses/LICENSE-2.0>\n");
+                try bw.flush();
+
+                return;
+            }
+        },
+        else => unreachable,
+    }
 }
 
 test {
