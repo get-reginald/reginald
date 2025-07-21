@@ -93,11 +93,15 @@ pub const Datetime = struct {
                 2 => if (leap_year) {
                     if (d.day.? > 29) {
                         return error.SyntaxError;
-                    } else if (d.day.? > 28) {
-                        return error.SyntaxError;
                     }
+                } else if (d.day.? > 28) {
+                    return error.SyntaxError;
                 },
                 else => return error.SyntaxError,
+            }
+
+            if (d.day.? == 0) {
+                return error.SyntaxError;
             }
 
             if (s.len == 10) {
@@ -183,6 +187,9 @@ pub const Datetime = struct {
             if (s[0] != 'Z' and s[0] != 'z') {
                 return error.SyntaxError;
             }
+
+            d.hour_offset = 0;
+            d.minute_offset = 0;
 
             return d;
         }
