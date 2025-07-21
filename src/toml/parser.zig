@@ -327,7 +327,7 @@ pub fn parseFromTokenSourceLeaky(
         resolved_options.allocate = .alloc_if_needed;
     }
 
-    const value = parseRootTable(allocator, scanner, resolved_options);
+    const value = try parseRootTable(allocator, scanner, resolved_options);
 
     assert(try scanner.next() == .end_of_document);
 
